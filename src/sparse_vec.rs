@@ -1,4 +1,8 @@
-use std::{ops::Range, slice};
+use std::{
+    iter::{Skip},
+    ops::Range,
+    slice,
+};
 
 #[derive(Debug)]
 pub struct SparseVec<T> {
@@ -19,17 +23,37 @@ impl<T> SparseVec<T> {
         self.len
     }
 
-    pub fn range_iter(&self, idxs: Range<usize>) -> Iter<'_, T> {
+    pub fn iter_range(&self, idxs: Range<usize>) -> Iter<'_, T> {
+        let mut blocks_iter = self.blocks.iter();
+        // discard blocks that come before the start
+        let block_iter = loop {
+            if let Some((offset, vec)) = blocks_iter.next() {
+                if idxs.start < offset + vec.len() {
+                    break Some((
+                        *offset,
+                        vec.iter()
+                            .skip(idxs.start.checked_sub(*offset).unwrap_or(0)),
+                    ));
+                }
+            } else {
+                break None;
+            }
+        };
         Iter {
             len: idxs.end,
             position: idxs.start,
-            blocks_iter: self.blocks.iter(),
-            block_iter: None,
+            blocks_iter,
+            block_iter,
         }
     }
 
     pub fn iter(&self) -> Iter<'_, T> {
-        self.range_iter(0..self.len)
+        Iter {
+            len: self.len,
+            position: 0,
+            blocks_iter: self.blocks.iter(),
+            block_iter: None,
+        }
     }
 
     /// Insert data into empty space
@@ -68,26 +92,22 @@ impl<T> From<Vec<T>> for SparseVec<T> {
 }
 
 pub struct Iter<'i, T> {
+    /// where the iteration ends
     len: usize,
+    /// where the next iteration will come from
     position: usize,
+    /// the remaining blocks to be iterated over
     blocks_iter: slice::Iter<'i, (usize, Vec<T>)>,
-    block_iter: Option<(usize, slice::Iter<'i, T>)>,
+    /// the current block being iteratred over
+    block_iter: Option<(usize, Skip<slice::Iter<'i, T>>)>,
 }
 
 impl<'i, T> Iter<'i, T> {
     fn next_block(&mut self) {
-        self.block_iter = loop {
-            let block = self
-                .blocks_iter
-                .next();
-            if let Some((offset, vec)) = block {
-                if self.position < offset + vec.len() {
-                    break Some((*offset, vec.iter()))
-                }
-            } else {
-                break None
-            }
-        };
+        self.block_iter = self
+            .blocks_iter
+            .next()
+            .map(|(offset, vec)| (*offset, vec.iter().skip(0)));
     }
 }
 
@@ -208,4 +228,63 @@ fn overlap_insert_after() {
     let mut vec: SparseVec<u8> = SparseVec::with_len(5);
     vec.insert_vec(0, vec![1, 2, 3]);
     vec.insert_vec(2, vec![3, 4]);
+}
+
+#[test]
+fn iterate_range_empty() {
+    assert_eq!(
+        SparseVec::<u32>::with_len(5)
+            .iter_range(3..5)
+            .collect::<Vec<_>>(),
+        vec![None, None]
+    );
+}
+
+#[test]
+fn iterate_range_full() {
+    assert_eq!(
+        SparseVec::<u32>::from(vec![1, 2, 3, 4, 5])
+            .iter_range(3..5)
+            .map(|o| o.copied())
+            .collect::<Vec<_>>(),
+        (4..=5).map(Some).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn iterate_empty_full() {
+    assert_eq!(
+        SparseVec::<u32>::with_len(5)
+            .iter_range(0..5)
+            .collect::<Vec<_>>(),
+        vec![None, None, None, None, None]
+    );
+}
+
+#[test]
+fn iterate_range_full_full() {
+    assert_eq!(
+        SparseVec::<u32>::from(vec![1, 2, 3, 4, 5])
+            .iter_range(0..5)
+            .map(|o| o.copied())
+            .collect::<Vec<_>>(),
+        (1..=5).map(Some).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn iter_range_half_before() {
+    let mut p = SparseVec::<u8>::with_len(20);
+    p.insert_vec(10, (10..20).collect());
+    assert_eq!(
+        p.iter_range(5..20).take(5).collect::<Vec<_>>(),
+        std::iter::repeat(None).take(5).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        p.iter_range(5..20)
+            .skip(5)
+            .map(|o| o.copied())
+            .collect::<Vec<_>>(),
+        (10..20).map(|s| Some(s)).collect::<Vec<_>>()
+    );
 }
